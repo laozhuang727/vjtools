@@ -1,5 +1,6 @@
 package com.vip.vjtools.vjtop;
 
+import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.util.Date;
@@ -22,18 +23,18 @@ public class VMDetailView {
 	private static final int DEFAULT_WIDTH = 100;
 	private static final int MIN_WIDTH = 80;
 
+	// 按线程CPU or 分配内存模式
+	volatile public DetailMode mode;
+	volatile public int threadLimit = 10;
+	volatile public boolean collectingData = true;
+
 	private VMInfo vmInfo;
 	private OperatingSystemMXBean operatingSystemMXBean;
 
 	private int width;
-
-	private double delay;
-	private int threadLimit = 10;
-
 	private boolean shouldExit;
 
-	// 按线程CPU or 分配内存模式
-	private DetailMode mode;
+	private boolean firstTime = true;
 
 	private Map<Long, Long> lastThreadCpuTotalTimes = new HashMap<Long, Long>();
 	private Map<Long, Long> lastThreadSysCpuTotalTimes = new HashMap<Long, Long>();
@@ -47,7 +48,6 @@ public class VMDetailView {
 	}
 
 	public void printView() throws Exception {
-
 		long iterationStartTime = System.currentTimeMillis();
 		long preCpuTime = operatingSystemMXBean.getProcessCpuTime();
 
@@ -68,6 +68,31 @@ public class VMDetailView {
 		long deltaTime = System.currentTimeMillis() - iterationStartTime;
 		long deltaCpuTime = (operatingSystemMXBean.getProcessCpuTime() - preCpuTime) / (Utils.NANOS_TO_MILLS);
 		System.out.printf(" Cost time: %3dms, CPU time: %3dms%n", deltaTime, deltaCpuTime);
+		System.out.print(" Input command (h for help):");
+	}
+
+	/**
+	 * 打印单条线程的stack strace
+	 */
+	public void printStack(long tid) throws NumberFormatException, IOException {
+		ThreadInfo info = vmInfo.getThreadMXBean().getThreadInfo(tid, 20);
+		if (info == null) {
+			System.err.println(" TID not exist:" + tid);
+			return;
+		}
+		StackTraceElement[] trace = info.getStackTrace();
+		System.err.println(" " + info.getThreadId() + ":" + info.getThreadName());
+		for (StackTraceElement traceElement : trace) {
+			System.err.println("\tat " + traceElement);
+		}
+	}
+
+	public void printAllThreads() throws Exception {
+		long tids[] = vmInfo.getThreadMXBean().getAllThreadIds();
+		ThreadInfo[] threadInfos = vmInfo.getThreadMXBean().getThreadInfo(tids);
+		for (ThreadInfo info : threadInfos) {
+			System.err.println(" " + info.getThreadId() + "\t:" + info.getThreadName());
+		}
 	}
 
 	private boolean checkState() {
@@ -195,6 +220,8 @@ public class VMDetailView {
 			return;
 		}
 
+		collectingData = false;
+
 		// 打印线程汇总
 		double deltaAllThreadCpuLoad = Utils.calcLoad(vmInfo.deltaUptimeMills,
 				(deltaAllThreadCpu * 100) / (Utils.NANOS_TO_MILLS * 1D), 1);
@@ -230,7 +257,7 @@ public class VMDetailView {
 		for (ThreadInfo info : threadInfos) {
 			Long tid = info.getThreadId();
 			if (info != null) {
-				String threadName = Utils.shortName(info.getThreadName(), getThreadNameWidth(), 12);
+				String threadName = Utils.shortName(info.getThreadName(), getThreadNameWidth(), 20);
 
 				System.out.printf(dataFormat, tid, threadName, Utils.leftStr(info.getThreadState().toString(), 10),
 						getThreadCPUUtilization(threadCpuDeltaTimes.get(tid), vmInfo.deltaUptimeMills,
@@ -243,7 +270,7 @@ public class VMDetailView {
 		}
 
 		if (threadCpuTotalTimes.size() > threadLimit) {
-			System.out.printf("%n Note: Only top %d threads (according %s load) are shown!%n", threadLimit, mode);
+			System.out.printf("%n Only top %d threads (according %s load) are shown!%n", threadLimit, mode);
 		}
 
 		lastThreadCpuTotalTimes = threadCpuTotalTimes;
@@ -292,6 +319,8 @@ public class VMDetailView {
 			return;
 		}
 
+		collectingData = false;
+
 		// 打印线程汇总信息，这里因为最后单位是精确到秒，所以bytes除以毫秒以后要乘以1000才是按秒统计
 		System.out.printf(" THREADS-MEMORY: %5s/s allocation rate%n%n",
 				Utils.toSizeUnit((totalDeltaBytes * 1000) / vmInfo.deltaUptimeMills));
@@ -324,7 +353,7 @@ public class VMDetailView {
 		}
 
 		if (threadMemoryTotalBytesMap.size() > threadLimit) {
-			System.out.printf("%n Note: Only top %d threads (according %s allocated) are shown!%n", threadLimit,
+			System.out.printf("%n Only top %d threads (according %s allocated) are shown!%n", threadLimit,
 					mode.toString());
 		}
 
@@ -332,8 +361,12 @@ public class VMDetailView {
 	}
 
 	private void printWelcome() {
-		System.out.printf("%n Collecting data, please wait %d seconds......%n%n", (int) delay);
-		System.out.printf(" VMARGS: %s%n%n", vmInfo.vmArgs);
+		if (firstTime) {
+			System.out.printf(" VMARGS: %s%n%n", vmInfo.vmArgs);
+			firstTime = false;
+		}
+		System.out.printf("%n Collecting data, please wait ......%n%n");
+		collectingData = true;
 	}
 
 	private static double getThreadCPUUtilization(Long deltaThreadCpuTime, long totalTime, double factor) {
@@ -343,7 +376,8 @@ public class VMDetailView {
 		if (totalTime == 0) {
 			return 0;
 		}
-		return deltaThreadCpuTime * 100d / factor / totalTime;// 这里因为最后单位是百分比%，所以cpu time除以total cpu time以后要乘以100，才可以再加上单位%
+		return deltaThreadCpuTime * 100d / factor / totalTime;// 这里因为最后单位是百分比%，所以cpu time除以total cpu
+															  // time以后要乘以100，才可以再加上单位%
 	}
 
 	private static double getThreadMemoryUtilization(Long threadBytes, long totalBytes) {
@@ -356,10 +390,6 @@ public class VMDetailView {
 		return (threadBytes * 100d) / totalBytes;// 这里因为最后单位是百分比%，所以bytes除以totalBytes以后要乘以100，才可以再加上单位%
 	}
 
-	public void sleep(long millis) throws Exception {
-		Thread.sleep(millis);
-	}
-
 	public boolean shouldExit() {
 		return shouldExit;
 	}
@@ -367,16 +397,8 @@ public class VMDetailView {
 	/**
 	 * Requests the disposal of this view - it should be called again.
 	 */
-	protected void exit() {
+	public void exit() {
 		shouldExit = true;
-	}
-
-	public void setThreadLimit(int threadLimit) {
-		this.threadLimit = threadLimit;
-	}
-
-	public void setDelay(double delay) {
-		this.delay = delay;
 	}
 
 	private void setWidth(Integer width) {

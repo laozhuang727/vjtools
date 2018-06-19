@@ -1,47 +1,53 @@
 package com.vip.vjtools.vjmap;
 
-import com.vip.vjtools.vjmap.oops.HistogramHeapAccessor;
-import com.vip.vjtools.vjmap.oops.HistogramHeapVisitor;
+import java.util.List;
+
+import com.vip.vjtools.vjmap.oops.GenAddressAccessor;
+import com.vip.vjtools.vjmap.oops.HeapHistogramVisitor;
+import com.vip.vjtools.vjmap.oops.OldgenAccessor;
+import com.vip.vjtools.vjmap.oops.SurvivorAccessor;
+
 import sun.jvm.hotspot.HotSpotAgent;
 import sun.jvm.hotspot.oops.ObjectHeap;
 import sun.jvm.hotspot.runtime.VM;
-
-import java.util.ArrayList;
-import java.util.List;
 
 public class VJMap {
 
 	public static void runHeapVisitor(int pid, boolean orderByName, long minSize) {
 		ObjectHeap heap = VM.getVM().getObjectHeap();
-		HistogramHeapVisitor visitor = new HistogramHeapVisitor();
+		HeapHistogramVisitor visitor = new HeapHistogramVisitor();
 
-		System.err.println("Start to dump all areas. This may take a while...");
+		System.out.println("Start to dump all areas. This may take a while...");
 		heap.iterate(visitor);
 
-		List<ClassStats> list = new ArrayList<ClassStats>();
-		list.addAll(visitor.getClassStatsMap().values());
+		List<ClassStats> list = visitor.getClassStatsList();
 		ResultPrinter resultPrinter = new ResultPrinter();
 		resultPrinter.printAllGens(System.out, list, orderByName, minSize);
 	}
 
-	public static void runSurvior(int minAge, boolean orderByName, long minSize) {
-		HistogramHeapAccessor accessor = new HistogramHeapAccessor();
+	public static void runSurviorAccessor(int minAge, boolean orderByName, long minSize) {
+		SurvivorAccessor accessor = new SurvivorAccessor();
 
-		System.err.println("Start to dump survivor area. This may take a while...");
-		List<ClassStats> list = accessor.dumpSurvivor(minAge);
+		System.out.println("Start to dump survivor area. This may take a while...");
+		List<ClassStats> list = accessor.dump(minAge);
 
 		ResultPrinter resultPrinter = new ResultPrinter();
 		resultPrinter.printSurvivor(System.out, list, orderByName, minSize, minAge);
 	}
 
-	public static void runCms(boolean orderByName, long minSize) {
-		HistogramHeapAccessor accessor = new HistogramHeapAccessor();
+	public static void runOldGenAccessor(boolean orderByName, long minSize) {
+		OldgenAccessor accessor = new OldgenAccessor();
 
-		System.err.println("Start to dump oldgen area. This may take a while...");
-		List<ClassStats> list = accessor.dumpCms();
+		System.out.println("Start to dump oldgen area. This may take a while...");
+		List<ClassStats> list = accessor.dump();
 
 		ResultPrinter resultPrinter = new ResultPrinter();
 		resultPrinter.printOldGen(System.out, list, orderByName, minSize);
+	}
+
+	public static void printGenAddress() {
+		GenAddressAccessor accessor = new GenAddressAccessor();
+		accessor.printHeapAddress();
 	}
 
 	public static void main(String[] args) {
@@ -81,7 +87,6 @@ public class VJMap {
 		}
 
 		Integer pid = Integer.valueOf(args[1]);
-		System.out.println("PID:" + pid);
 
 		HotSpotAgent agent = new HotSpotAgent();
 
@@ -91,9 +96,14 @@ public class VJMap {
 			if (modeFlag.startsWith("-all")) {
 				runHeapVisitor(pid, orderByName, minSize);
 			} else if (modeFlag.startsWith("-sur")) {
-				runSurvior(minAge, orderByName, minSize);
+				runSurviorAccessor(minAge, orderByName, minSize);
 			} else if (modeFlag.startsWith("-old")) {
-				runCms(orderByName, minSize);
+				runOldGenAccessor(orderByName, minSize);
+			} else if (modeFlag.startsWith("-address")) {
+				printGenAddress();
+			} else if (modeFlag.startsWith("-version")) {
+				System.out.println("vjmap version:1.0.1");
+				return;
 			} else {
 				printHelp();
 				return;
@@ -102,14 +112,22 @@ public class VJMap {
 			double secs = (endTime - startTime) / 1000.0d;
 			System.out.printf("%n Heap traversal took %.1f seconds.%n", secs);
 			System.out.flush();
+		} catch (Exception e) {
+			System.out.println(e.getMessage());
+			if (e.getMessage().contains("Can't attach to the process")) {
+				System.out.println(
+						"Please use the same user of the target JVM to run vjmap or use root to run it (sudo -E vjmap.sh ...)");
+			}
 		} finally {
 			agent.detach();
 		}
 	}
 
+
 	private static void printHelp() {
 		int leftLength = "-all:minsize=1024,byname".length();
 		String format = " %-" + leftLength + "s  %s%n";
+
 		System.out.println("vjmap.sh <options> <PID>");
 		System.out.printf(format, "-all", "print all gens histogram, order by total size");
 		System.out.printf(format, "-all:minsize=1024", "print all gens histogram, total size>=1024");
@@ -125,5 +143,6 @@ public class VJMap {
 		System.out.printf(format, "-sur:minage=4", "print survivor histogram, age>=4");
 		System.out.printf(format, "-sur:minsize=1024,byname",
 				"print survivor histogram, age>=3, survivor size>=1024, order by class name");
+		System.out.printf(format, "-address", "print address for all gens");
 	}
 }

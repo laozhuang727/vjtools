@@ -6,11 +6,6 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.util.Arrays;
-import java.util.Locale;
-import java.util.logging.ConsoleHandler;
-import java.util.logging.Handler;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 import joptsimple.OptionParser;
 import joptsimple.OptionSet;
@@ -24,34 +19,37 @@ import joptsimple.OptionSet;
  *
  */
 public class VJTop {
-	public static final String VERSION = "1.0.0";
 
-	public static final double DEFAULT_DELAY = 10.0;
+	public static final String VERSION = "1.0.1";
 
-	private final static String CLEAR_TERMINAL_ANSI_CMD = new String(
-			new byte[] { (byte) 0x1b, (byte) 0x5b, (byte) 0x32, (byte) 0x4a, (byte) 0x1b, (byte) 0x5b, (byte) 0x48 });
+	public static final int DEFAULT_INTERVAL = 10;
 
-	private static Logger logger;
+	private static final String CLEAR_TERMINAL_ANSI_CMD = new String(
+			new byte[]{(byte) 0x1b, (byte) 0x5b, (byte) 0x32, (byte) 0x4a, (byte) 0x1b, (byte) 0x5b, (byte) 0x48});
 
-	private Double delay_ = -1d;
+	public VMDetailView view;
 
-	private int maxIterations_ = -1;
+	public volatile Integer interval = DEFAULT_INTERVAL;
+
+	private volatile boolean needMoreInput = false;
+
+	private Thread mainThread;
+
+	private int maxIterations = -1;
 
 	private static OptionParser createOptionParser() {
 		OptionParser parser = new OptionParser();
 		// commmon
-		parser.acceptsAll(Arrays.asList(new String[] { "help", "?", "h" }), "shows this help").forHelp();
-		parser.acceptsAll(Arrays.asList(new String[] { "n", "iteration" }),
+		parser.acceptsAll(Arrays.asList(new String[]{"help", "?", "h"}), "shows this help").forHelp();
+		parser.acceptsAll(Arrays.asList(new String[]{"n", "iteration"}),
 				"vjtop will exit after n output iterations  (defaults to unlimit)").withRequiredArg()
 				.ofType(Integer.class);
-		parser.acceptsAll(Arrays.asList(new String[] { "d", "delay" }),
-				"delay between each output iteration (defaults to 10s)").withRequiredArg().ofType(Double.class);
-		parser.acceptsAll(Arrays.asList(new String[] { "v", "verbose" }), "verbose mode");
-		parser.acceptsAll(Arrays.asList(new String[] { "w", "width" }),
+		parser.acceptsAll(Arrays.asList(new String[]{"d", "interval"}),
+				"interval between each output iteration (defaults to 10s)").withRequiredArg().ofType(Integer.class);
+		parser.acceptsAll(Arrays.asList(new String[]{"w", "width"}),
 				"Number of columns for the console display (defaults to 100)").withRequiredArg().ofType(Integer.class);
-		parser.acceptsAll(Arrays.asList(new String[] { "l", "limit" }),
-				"Number of rows for the console display ( default to 10 threads)").withRequiredArg()
-				.ofType(Integer.class);
+		parser.acceptsAll(Arrays.asList(new String[]{"l", "limit"}),
+				"Number of threads to display ( default to 10 threads)").withRequiredArg().ofType(Integer.class);
 
 		// detail mode
 		parser.accepts("cpu",
@@ -67,11 +65,8 @@ public class VJTop {
 
 	public static void main(String[] args) {
 		try {
-			// 1. create logger
-			Locale.setDefault(Locale.US);
-			logger = Logger.getLogger("vjtop");
 
-			// 2. create option parser
+			// 1. create option parser
 			OptionParser parser = createOptionParser();
 			OptionSet optionSet = parser.parse(args);
 
@@ -80,7 +75,7 @@ public class VJTop {
 				System.exit(0);
 			}
 
-			// 3. create view
+			// 2. create view
 			String pid = parsePid(parser, optionSet);
 
 			VMDetailView.DetailMode displayMode = parseDisplayMode(optionSet);
@@ -94,36 +89,37 @@ public class VJTop {
 
 			if (optionSet.hasArgument("limit")) {
 				Integer limit = (Integer) optionSet.valueOf("limit");
-				view.setThreadLimit(limit);
+				view.threadLimit = limit;
 			}
 
-			// 4. create main application
-			VJTop vjtop = new VJTop();
-			double delay = DEFAULT_DELAY;
-			if (optionSet.hasArgument("delay")) {
-				delay = (Double) (optionSet.valueOf("delay"));
-				if (delay < 1d) {
-					throw new IllegalArgumentException("Delay cannot be set below 1.0");
+			// 3. create main application
+			VJTop app = new VJTop();
+			app.mainThread = Thread.currentThread();
+			app.view = view;
+
+			Integer interval = DEFAULT_INTERVAL;
+			if (optionSet.hasArgument("interval")) {
+				interval = (Integer) (optionSet.valueOf("interval"));
+				if (interval < 1) {
+					throw new IllegalArgumentException("Interval cannot be set below 1.0");
 				}
 			}
-			view.setDelay(delay);
-			vjtop.setDelay(delay);
+			app.interval = interval;
 
 			if (optionSet.hasArgument("n")) {
 				Integer iterations = (Integer) optionSet.valueOf("n");
-				vjtop.setMaxIterations(iterations);
+				app.maxIterations = iterations;
 			}
 
-			if (optionSet.has("verbose")) {
-				fineLogging();
-				logger.setLevel(Level.ALL);
-				logger.fine("Verbosity mode.");
-			}
+			// 4. start thread to get user input
+			Thread interactiveThread = new Thread(new InteractiveTask(app));
+			interactiveThread.setDaemon(true);
+			interactiveThread.start();
 
-			// 5. run
-			vjtop.run(view);
+			// 5. run views
+			app.run(view);
 		} catch (Exception e) {
-			e.printStackTrace();
+			e.printStackTrace(System.err);
 		}
 	}
 
@@ -171,28 +167,15 @@ public class VJTop {
 		}
 	}
 
-	private static void fineLogging() {
-		// get the top Logger:
-		Logger topLogger = java.util.logging.Logger.getLogger("");
-
-		// Handler for console (reuse it if it already exists)
-		Handler consoleHandler = null;
-		// see if there is already a console handler
-		for (Handler handler : topLogger.getHandlers()) {
-			if (handler instanceof ConsoleHandler) {
-				// found the console handler
-				consoleHandler = handler;
-				break;
-			}
+	private static void clearTerminal() {
+		if (System.getProperty("os.name").contains("Windows")) {
+			// hack
+			System.out.printf("%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n");
+		} else if (System.getProperty("vjtop.altClear") != null) {
+			System.out.print('\f');
+		} else {
+			System.out.print(CLEAR_TERMINAL_ANSI_CMD);
 		}
-
-		if (consoleHandler == null) {
-			// there was no console handler found, create a new one
-			consoleHandler = new ConsoleHandler();
-			topLogger.addHandler(consoleHandler);
-		}
-		// set the console handler to fine:
-		consoleHandler.setLevel(java.util.logging.Level.FINEST);
 	}
 
 	private void run(VMDetailView view) throws Exception {
@@ -201,7 +184,8 @@ public class VJTop {
 			int iterations = 0;
 			while (!view.shouldExit()) {
 
-				if (maxIterations_ > 1 || maxIterations_ == -1) {
+				if (maxIterations > 1 || maxIterations == -1) {
+					waitForInput();
 					clearTerminal();
 				}
 
@@ -209,12 +193,20 @@ public class VJTop {
 
 				System.out.flush();
 
-				if (maxIterations_ > 0 && iterations >= maxIterations_) {
+				if (maxIterations > 0 && iterations >= maxIterations) {
 					break;
 				}
 
+				int sleepTime = interval;
+
+				// 第一次只等待1秒
+				if (iterations == 0) {
+					sleepTime = 1;
+				}
+
 				++iterations;
-				view.sleep((long) (delay_ * 1000));
+
+				Utils.sleep((long) (sleepTime * 1000));
 			}
 		} catch (NoClassDefFoundError e) {
 			e.printStackTrace(System.err);
@@ -226,22 +218,25 @@ public class VJTop {
 		}
 	}
 
-	private void clearTerminal() {
-		if (System.getProperty("os.name").contains("Windows")) {
-			// hack
-			System.out.printf("%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n%n");
-		} else if (System.getProperty("vjtop.altClear") != null) {
-			System.out.print('\f');
-		} else {
-			System.out.print(CLEAR_TERMINAL_ANSI_CMD);
+
+	public void exit() {
+		view.exit();
+		mainThread.interrupt();
+		System.err.println(" Quit.");
+	}
+
+	public void preventFlush() {
+		needMoreInput = true;
+	}
+
+	public void continueFlush() {
+		needMoreInput = false;
+	}
+
+	private void waitForInput() {
+		while (needMoreInput) {
+			Utils.sleep(1000);
 		}
 	}
 
-	public void setDelay(Double delay) {
-		delay_ = delay;
-	}
-
-	public void setMaxIterations(int iterations) {
-		maxIterations_ = iterations;
-	}
 }
